@@ -2,9 +2,11 @@
 
 namespace Espo\Modules\MyExt\Jobs;
 
-class MyJob extends \Espo\Core\Jobs\Base
+use Espo\Core\Job\JobDataLess;
+
+class MyJob implements JobDataLess
 {
-    public function run()
+    public function run(): void
     {
         //do stuff
     }
