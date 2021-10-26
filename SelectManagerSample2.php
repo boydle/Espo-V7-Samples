@@ -2,33 +2,32 @@
 namespace Espo\Modules\ControlBoard\Services;
 
 use Espo\Core\Utils\Util;
+use Espo\Core\{
+FieldProcessing\ListLoadProcessor,
+FieldProcessing\Loader\Params as FieldLoaderParams
+};
 
 class ControlBoard extends \Espo\Services\Record
 {
-    public function getListDataCards($params)
+
+    public function getListDataCards($searchParams)
     {
         $disableCount = $this->metadata->get(['entityDefs', $this->entityType, 'collection', 'countDisabled']) ?? false;
-        if ($this->listCountQueryDisabled || $this->getMetadata()->get(['entityDefs', $this->entityType, 'collection', 'countDisabled'])) {
-            $disableCount = true;
+        $maxSize = $searchParams->getMaxSize();
+        if ($disableCount && $maxSize) {
+            $searchParams = $searchParams->withMaxSize($maxSize + 1);
         }
-        $maxSize = 0;
-        if ($disableCount) {
-            if (!empty($params['maxSize'])) {
-                $maxSize = $params['maxSize'];
-                $params['maxSize'] = $params['maxSize'] + 1;
-            }
-        }
-        $selectParams = $this->getSelectParams($params);
-        $selectParams['maxTextColumnsLength'] = $this->getMaxSelectTextAttributeLength();
-        $selectAttributeList = $this->getSelectManager()->getSelectAttributeList($params);
-        if ($selectAttributeList) {
-            $selectParams['select'] = $selectAttributeList;
-        } else {
-            $selectParams['skipTextColumns'] = $this->isSkipSelectTextAttributes();
-        }
-        $controlBoardCriteriaData = $this->getMetadata()->get(['entityDefs', $this->entityType, 'controlBoardCriteriaData']);
+        $recordService = $this->recordServiceContainer->get($this->entityType);
+
+        $query = $this->selectBuilderFactory->create()->from($this->entityType)->withStrictAccessControl()->withSearchParams($searchParams)->build();
+
+        $entityCollection = $this->entityManager->getCollectionFactory()->create($this->entityType);
+
+        $repository = $this->entityManager->getRepository($this->entityType);
+
+        $controlBoardCriteriaData = $this->getMetadata()->get(['entityDefs', $this->entityType,'controlBoardCriteriaData']);
         $controlBoardCriteriaField = $controlBoardCriteriaData['controlBoardCriteriaField'];
-        $fieldSelectStatement = $this->getMetadata()->get(['entityDefs', $this->entityType, 'fields', $controlBoardCriteriaField, 'select']);
+        $fieldSelectStatement = $this->getMetadata()->get(['entityDefs', $this->entityType, 'fields',$controlBoardCriteriaField, 'select']);
         if ($fieldSelectStatement) {
             $pdo = $this->getEntityManager()->getPDO();
             $sql = 'UPDATE '.Util::camelCaseToUnderscore($this->entityType).' SET `'.$controlBoardCriteriaField.'` = '.$fieldSelectStatement;
@@ -37,37 +36,41 @@ class ControlBoard extends \Espo\Services\Record
         }
         $collection = new \Espo\ORM\EntityCollection([], $this->entityType);
         $criteriaConditionGroups = $controlBoardCriteriaData['criteriaConditionGroups'];
+
         $additionalData = (object) [
             'groupList' => []
         ];
 
         foreach ($criteriaConditionGroups as $group) {
-            $selectParamsSub = $selectParams;
             $type = $group['conditionGroupType'];
             $label = $group['conditionGroupLabel'];
             $conditionIndex = 0;
-            foreach ($group['conditionValues'] as $whereCondition) {
+            foreach($group['conditionValues'] as $whereCondition) {
+                $whereClause = [];
                 $operator = '';
-                if ($whereCondition['operator'] && $whereCondition['operator'] !== '=') {
+                if($whereCondition['operator'] && $whereCondition['operator'] !== '=') {
                     $operator = $whereCondition['operator'];
                 }
                 $groupValue = $whereCondition['value'];
-                if ($whereCondition['valueType'] && $whereCondition['valueType'] === 'int') {
+                if($whereCondition['valueType'] && $whereCondition['valueType'] === 'int') {
                     $groupValue = intval($groupValue);
                 }
-                if ($conditionIndex > 0 && $type === 'or') {
-                    $selectParamsSub['whereClause'][] = ['OR' => [$controlBoardCriteriaField.$operator => $groupValue]];
+                if($conditionIndex > 0 && $type === 'or') {
+                    $whereClause[] = ['OR' => [$controlBoardCriteriaField.$operator => $groupValue]];
                 } else {
-                    $selectParamsSub['whereClause'][] = [$controlBoardCriteriaField.$operator => $groupValue];
+                    $whereClause[] = [$controlBoardCriteriaField.$operator => $groupValue];
                 }
                 $conditionIndex++;
             }
-            $o = (object) [
+            $itemSelectBuilder = $this->entityManager->getQueryBuilder()->select()->clone($query);
+            $itemSelectBuilder->where($whereClause);
+            $groupObject = (object) [
                 'name' => $label
             ];
-            $collectionSub = $this->getRepository()->find($selectParamsSub);
+            $itemQuery = $itemSelectBuilder->build();
+            $collectionSub = $repository->clone($itemQuery)->find();
             if (!$disableCount) {
-                $totalSub = $this->getRepository()->count($selectParamsSub);
+                $totalSub = $repository->clone($itemQuery)->count();
             } else {
                 if ($maxSize && count($collectionSub) > $maxSize) {
                     $totalSub = -1;
@@ -76,23 +79,19 @@ class ControlBoard extends \Espo\Services\Record
                     $totalSub = -2;
                 }
             }
+            $fieldLoader = new FieldLoaderParams();
+            $loadProcessorParams = $fieldLoader->withSelect($searchParams->getSelect());
             foreach ($collectionSub as $e) {
-                $this->loadAdditionalFieldsForList($e);
-                if (!empty($params['loadAdditionalFields'])) {
-                    $this->loadAdditionalFields($e);
-                }
-                if (!empty($selectAttributeList)) {
-                    $this->loadLinkMultipleFieldsForList($e, $selectAttributeList);
-                }
-                $this->prepareEntityForOutput($e);
+                $this->listLoadProcessor->process($e, $loadProcessorParams);
+                $recordService->prepareEntityForOutput($e);
                 $collection[] = $e;
             }
-            $o->total = $totalSub;
-            $o->list = $collectionSub->getValueMapList();
-            $additionalData->groupList[] = $o;
+            $groupObject->total = $totalSub;
+            $groupObject->list = $collectionSub->getValueMapList();
+            $additionalData->groupList[] = $groupObject;
         }
         if (!$disableCount) {
-            $total = $this->getRepository()->count($selectParams);
+            $total = $repository->clone($query)->count();
         } else {
             if ($maxSize && count($collection) > $maxSize) {
                 $total = -1;
@@ -101,10 +100,11 @@ class ControlBoard extends \Espo\Services\Record
                 $total = -2;
             }
         }
-        return (object) [
+        $result = (object) [
             'total' => $total,
             'collection' => $collection,
             'additionalData' => $additionalData
         ];
+        return $result;
     }
 }
