@@ -1,24 +1,18 @@
 <?php
 namespace Espo\Modules\ControlBoard\Controllers;
 
+use Espo\Core\Api\Request;
+
 class ControlBoard extends \Espo\Core\Templates\Controllers\Base
 {
-    public function getActionListDataCards($params, $data, $request)
+    public function getActionListDataCards(Request $request): object
     {
-        if (!$this -> getAcl() -> check($this -> name, 'read')) {
-            throw new Forbidden("No read access for {$this -> name}.");
+        if (!$this->getAcl()->check($this->name, 'read')) {
+            throw new Forbidden("No read access for {$this->name}.");
         }
-        $params = [];
-        // get the collection parameters from the front-end routing request
-        $this -> fetchListParamsFromRequest($params, $request, $data);
-        $maxSizeLimit = $this -> getConfig() -> get('recordListMaxSizeLimit', self::MAX_SIZE_LIMIT);
-        if (empty($params['maxSize'])) {
-            $params['maxSize'] = $maxSizeLimit;
-        }
-        if (!empty($params['maxSize']) & $params['maxSize']  >  $maxSizeLimit) {
-            throw new Forbidden("Max size should should not exceed " . $maxSizeLimit . ". Use offset and limit.");
-        }
-        $result = $this -> getRecordService() -> getListDataCards($params);
+        // get the collection parameters from the front-end request
+        $searchParams = $this->searchParamsFetcher->fetch($request);
+        $result = $this->getRecordService()->getListDataCards($searchParams);
         return (object) [
             'total' => $result->total,
             'list' => $result->collection->getValueMapList(),
